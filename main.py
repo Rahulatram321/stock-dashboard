@@ -5,13 +5,13 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import numpy as np
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from database import StockPrice, SessionLocal, create_tables, get_db, is_db_empty
+from database import StockPrice, SessionLocal, create_tables
 from data_collector import run_data_collection, get_company_name
 from models import (
     CompanyInfo,
@@ -29,6 +29,14 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Normalize symbols so both INFY and INFY.NS resolve to the NSE form."""
+    normalized = symbol.strip().upper()
+    if not normalized.endswith(".NS"):
+        normalized = f"{normalized}.NS"
+    return normalized
 
 
 @asynccontextmanager
@@ -103,12 +111,14 @@ def get_companies(db: Session = Depends(get_db_session)) -> List[CompanyInfo]:
             company = CompanyInfo(
                 symbol=price.symbol,
                 name=get_company_name(price.symbol),
-                current_price=round(price.close, 2) if price.close else None,
+                current_price=round(price.close, 2)
+                if price.close is not None
+                else None,
                 daily_return=round(price.daily_return, 4)
-                if price.daily_return
+                if price.daily_return is not None
                 else None,
                 volatility_score=round(price.volatility_score, 4)
-                if price.volatility_score
+                if price.volatility_score is not None
                 else None,
             )
             companies.append(company)
@@ -138,9 +148,10 @@ def get_stock_data(
 ) -> List[StockDataPoint]:
     """Get historical stock data for a specific symbol."""
     try:
+        normalized_symbol = normalize_symbol(symbol)
         records = (
             db.query(StockPrice)
-            .filter(StockPrice.symbol == symbol)
+            .filter(StockPrice.symbol == normalized_symbol)
             .order_by(StockPrice.date.desc())
             .limit(days)
             .all()
@@ -149,7 +160,7 @@ def get_stock_data(
         if not records:
             raise HTTPException(
                 status_code=404,
-                detail=f"No data found for symbol: {symbol}",
+                detail=f"No data found for symbol: {normalized_symbol}",
             )
 
         # Sort by date ascending
@@ -159,16 +170,16 @@ def get_stock_data(
         for record in records:
             point = StockDataPoint(
                 date=record.date,
-                open=round(record.open, 2) if record.open else None,
-                high=round(record.high, 2) if record.high else None,
-                low=round(record.low, 2) if record.low else None,
-                close=round(record.close, 2) if record.close else None,
-                volume=record.volume if record.volume else None,
+                open=round(record.open, 2) if record.open is not None else None,
+                high=round(record.high, 2) if record.high is not None else None,
+                low=round(record.low, 2) if record.low is not None else None,
+                close=round(record.close, 2) if record.close is not None else None,
+                volume=record.volume if record.volume is not None else None,
                 daily_return=round(record.daily_return, 4)
-                if record.daily_return
+                if record.daily_return is not None
                 else None,
                 moving_avg_7=round(record.moving_avg_7, 2)
-                if record.moving_avg_7
+                if record.moving_avg_7 is not None
                 else None,
             )
             data_points.append(point)
@@ -198,16 +209,17 @@ def get_summary(
 ) -> StockSummary:
     """Get summary statistics for a specific stock."""
     try:
+        normalized_symbol = normalize_symbol(symbol)
         records = (
             db.query(StockPrice)
-            .filter(StockPrice.symbol == symbol)
+            .filter(StockPrice.symbol == normalized_symbol)
             .all()
         )
 
         if not records:
             raise HTTPException(
                 status_code=404,
-                detail=f"No data found for symbol: {symbol}",
+                detail=f"No data found for symbol: {normalized_symbol}",
             )
 
         # Calculate aggregates
@@ -220,7 +232,7 @@ def get_summary(
         lows = [r.week52_low for r in records if r.week52_low is not None]
 
         summary = StockSummary(
-            symbol=symbol,
+            symbol=normalized_symbol,
             week52_high=round(max(highs), 2) if highs else None,
             week52_low=round(min(lows), 2) if lows else None,
             avg_close=round(sum(closes) / len(closes), 2) if closes else None,
@@ -260,10 +272,13 @@ def compare_stocks(
 ) -> ComparisonResponse:
     """Compare two stocks' performance over the last 90 days."""
     try:
+        normalized_symbol1 = normalize_symbol(symbol1)
+        normalized_symbol2 = normalize_symbol(symbol2)
+
         # Get last 90 days for symbol1
         records1 = (
             db.query(StockPrice)
-            .filter(StockPrice.symbol == symbol1)
+            .filter(StockPrice.symbol == normalized_symbol1)
             .order_by(StockPrice.date.desc())
             .limit(90)
             .all()
@@ -272,7 +287,7 @@ def compare_stocks(
         # Get last 90 days for symbol2
         records2 = (
             db.query(StockPrice)
-            .filter(StockPrice.symbol == symbol2)
+            .filter(StockPrice.symbol == normalized_symbol2)
             .order_by(StockPrice.date.desc())
             .limit(90)
             .all()
@@ -281,43 +296,65 @@ def compare_stocks(
         if not records1:
             raise HTTPException(
                 status_code=404,
-                detail=f"No data found for symbol: {symbol1}",
+                detail=f"No data found for symbol: {normalized_symbol1}",
             )
         if not records2:
             raise HTTPException(
                 status_code=404,
-                detail=f"No data found for symbol: {symbol2}",
+                detail=f"No data found for symbol: {normalized_symbol2}",
             )
 
-        # Sort by date ascending
-        records1.reverse()
-        records2.reverse()
+        df1 = pd.DataFrame(
+            [
+                {
+                    "date": record.date,
+                    "close_1": record.close,
+                    "daily_return_1": record.daily_return,
+                }
+                for record in records1
+            ]
+        )
+        df2 = pd.DataFrame(
+            [
+                {
+                    "date": record.date,
+                    "close_2": record.close,
+                    "daily_return_2": record.daily_return,
+                }
+                for record in records2
+            ]
+        )
 
-        # Build data points
+        aligned_df = pd.merge(df1, df2, on="date", how="inner").sort_values("date")
+
         data1 = [
-            CompareDataPoint(date=r.date, close=round(r.close, 2) if r.close else None)
-            for r in records1
+            CompareDataPoint(
+                date=pd.to_datetime(row.date).to_pydatetime(),
+                close=round(row.close_1, 2) if pd.notna(row.close_1) else None,
+            )
+            for row in aligned_df.itertuples(index=False)
         ]
         data2 = [
-            CompareDataPoint(date=r.date, close=round(r.close, 2) if r.close else None)
-            for r in records2
+            CompareDataPoint(
+                date=pd.to_datetime(row.date).to_pydatetime(),
+                close=round(row.close_2, 2) if pd.notna(row.close_2) else None,
+            )
+            for row in aligned_df.itertuples(index=False)
         ]
 
-        # Calculate correlation of daily returns
-        returns1 = [r.daily_return for r in records1 if r.daily_return is not None]
-        returns2 = [r.daily_return for r in records2 if r.daily_return is not None]
+        returns_df = aligned_df.dropna(subset=["daily_return_1", "daily_return_2"])
 
         correlation: Optional[float] = None
-        if len(returns1) > 1 and len(returns2) > 1:
-            # Align the lengths
-            min_len = min(len(returns1), len(returns2))
-            corr_value = np.corrcoef(returns1[:min_len], returns2[:min_len])[0, 1]
+        if len(returns_df) > 1:
+            corr_value = np.corrcoef(
+                returns_df["daily_return_1"], returns_df["daily_return_2"]
+            )[0, 1]
             if not np.isnan(corr_value):
                 correlation = round(float(corr_value), 4)
 
         return ComparisonResponse(
-            symbol1=symbol1,
-            symbol2=symbol2,
+            symbol1=normalized_symbol1,
+            symbol2=normalized_symbol2,
             data1=data1,
             data2=data2,
             correlation=correlation,
@@ -368,34 +405,42 @@ def get_top_movers(db: Session = Depends(get_db_session)) -> TopMoversResponse:
                 detail="No data found for the latest date",
             )
 
-        # Sort by daily_return (handle None values)
         valid_records = [r for r in latest_records if r.daily_return is not None]
-        valid_records.sort(key=lambda x: x.daily_return, reverse=True)
+        gainers_source = sorted(
+            [r for r in valid_records if r.daily_return > 0],
+            key=lambda x: x.daily_return,
+            reverse=True,
+        )
+        losers_source = sorted(
+            [r for r in valid_records if r.daily_return < 0],
+            key=lambda x: x.daily_return,
+        )
 
         # Top 3 gainers
         gainers = []
-        for record in valid_records[:3]:
+        for record in gainers_source[:3]:
             gainer = MoversData(
                 symbol=record.symbol,
                 name=get_company_name(record.symbol),
-                current_price=round(record.close, 2) if record.close else None,
+                current_price=round(record.close, 2)
+                if record.close is not None
+                else None,
                 daily_return=round(record.daily_return, 4),
             )
             gainers.append(gainer)
 
         # Bottom 3 losers
         losers = []
-        for record in valid_records[-3:]:
+        for record in losers_source[:3]:
             loser = MoversData(
                 symbol=record.symbol,
                 name=get_company_name(record.symbol),
-                current_price=round(record.close, 2) if record.close else None,
+                current_price=round(record.close, 2)
+                if record.close is not None
+                else None,
                 daily_return=round(record.daily_return, 4),
             )
             losers.append(loser)
-
-        # Sort losers by daily_return ascending (most negative first)
-        losers.sort(key=lambda x: x.daily_return)
 
         return TopMoversResponse(
             top_gainers=gainers,

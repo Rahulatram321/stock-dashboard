@@ -225,19 +225,15 @@ volatility_score = (30-day rolling_std / 30-day rolling_mean) × 100
 
 ## Screenshots
 
-_Placeholders — replace with actual screenshots once the application is running._
+Run the app locally, open `frontend/index.html`, and capture fresh screenshots before submission.
 
-### Dashboard Overview
+Suggested screenshots to place in the `screenshots/` folder:
 
-![Dashboard Overview](screenshots/dashboard-overview.png)
+- `dashboard-overview.png`: left company list plus the main price chart
+- `stock-detail.png`: one company selected with the metric cards visible
+- `stock-comparison.png`: the compare chart with the correlation badge visible
 
-### Stock Detail View
-
-![Stock Detail](screenshots/stock-detail.png)
-
-### Stock Comparison
-
-![Stock Comparison](screenshots/stock-comparison.png)
+The repository includes a `screenshots/` folder placeholder so the README renders cleanly even before images are added.
 
 ## Future Improvements
 
