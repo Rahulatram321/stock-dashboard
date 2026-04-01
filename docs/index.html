@@ -19,9 +19,17 @@
         .side-head,.search,.pills{padding:16px}.side-head h2{margin:0 0 6px;font-size:.92rem}.side-head p{margin:0;color:#94a3b8;font-size:.78rem}.search input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid rgba(148,163,184,.2);background:rgba(15,23,42,.45);color:#fff;outline:none}
         .search input::placeholder{color:#94a3b8}.search input:focus{border-color:var(--blue)}.pills{display:flex;gap:8px;flex-wrap:wrap;padding-top:0;border-bottom:1px solid rgba(148,163,184,.12)}
         .pill{border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.4);color:#94a3b8;border-radius:999px;padding:7px 12px;font-size:.74rem;font-weight:700;cursor:pointer}.pill.active{background:var(--blue);border-color:var(--blue);color:#fff}
-        .company-list{flex:1;overflow:auto;padding:12px 10px 18px}.company{width:100%;display:flex;justify-content:space-between;gap:10px;padding:12px;border:1px solid transparent;border-radius:12px;background:transparent;color:inherit;cursor:pointer;text-align:left;margin-bottom:8px}
-        .company:hover{background:rgba(255,255,255,.05);border-color:rgba(148,163,184,.18)}.company.active{background:linear-gradient(135deg,rgba(59,130,246,.18),rgba(59,130,246,.06));border-color:rgba(59,130,246,.5)}
-        .company .nm{font-size:.88rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.company .sym{margin-top:3px;font-size:.72rem;color:#94a3b8}.company .px{text-align:right;min-width:84px}.company .px strong{display:block;color:#fff;font-size:.84rem}
+.company-list{flex:1;overflow:auto;padding:12px 10px 18px}
+.company-list::-webkit-scrollbar{width:4px}
+.company-list::-webkit-scrollbar-track{background:#0f172a}
+.company-list::-webkit-scrollbar-thumb{background:#334155;border-radius:4px}
+.company{width:100%;display:flex;flex-direction:column;gap:6px;padding:12px;border:1px solid transparent;border-radius:12px;background:transparent;color:inherit;cursor:pointer;text-align:left;margin-bottom:8px;border-left:3px solid transparent;overflow:hidden}
+.company:hover{background:rgba(255,255,255,.05);border-color:rgba(148,163,184,.18)}.company.active{background:#1e293b;border-color:rgba(59,130,246,.5);border-left-color:#3b82f6}
+.row-line{display:flex;justify-content:space-between;align-items:center;gap:4px;width:100%;overflow:hidden}
+.company .nm{display:block;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.88rem;font-weight:700}
+.company .sym{margin-top:3px;font-size:.72rem;color:#94a3b8;white-space:nowrap}
+.company .px{white-space:nowrap;flex-shrink:0;text-align:right;min-width:84px}
+.company .px strong{display:block;color:#fff;font-size:.84rem}
         .badge,.chip,.sent,.trend,.corr{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;padding:6px 10px;font-size:.78rem;font-weight:800}.pos{color:var(--green)}.neg{color:var(--red)}.badge.pos,.sent.bullish,.trend.bullish{background:rgba(22,163,74,.12);color:var(--green)}.badge.neg,.sent.bearish,.trend.bearish{background:rgba(220,38,38,.12);color:var(--red)}.badge.neu,.sent.neutral,.trend.neutral,.corr{background:rgba(148,163,184,.14);color:#334155}
         .main{flex:1;min-width:0;padding:24px}.tabs{display:inline-flex;gap:8px;padding:8px;background:rgba(255,255,255,.92);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);position:sticky;top:calc(var(--nav) + 18px);z-index:20;margin-bottom:24px}
         .tab{border:none;background:transparent;color:var(--muted);padding:11px 18px;border-radius:12px;font-weight:800;cursor:pointer}.tab.active{color:#fff;background:linear-gradient(135deg,var(--blue),var(--blue2));box-shadow:0 10px 22px rgba(59,130,246,.2)}
@@ -187,7 +195,16 @@ function renderCompanies(){
     if(!state.companies.length){$("#company-list").innerHTML=errorBox("Company universe could not be loaded from the API.");return}
     const list=state.companies.filter((c)=>(state.sector==="All"||c.sector===state.sector)&&(`${c.name} ${c.symbol}`.toLowerCase().includes(q)));
     if(!list.length){$("#company-list").innerHTML=emptyBox("No companies match the current filters.");return}
-    $("#company-list").innerHTML=list.map((c)=>`<button class="company ${state.current===c.symbol?"active":""}" data-symbol="${esc(c.symbol)}"><div><div class="nm">${esc(c.name)}</div><div class="sym">${esc(c.symbol)}</div></div><div class="px"><strong>${rupee(c.current_price)}</strong><span class="badge ${badge(c.daily_return)}">${pct(c.daily_return)}</span></div></button>`).join("")
+    $("#company-list").innerHTML=list.map((c)=>`<button class="company ${state.current===c.symbol?"active":""}" data-symbol="${esc(c.symbol)}">
+        <div class="row-line">
+            <span class="nm">${esc(c.name)}</span>
+            <span class="px"><strong>${rupee(c.current_price)}</strong></span>
+        </div>
+        <div class="row-line">
+            <span class="sym">${esc(c.symbol)}</span>
+            <span class="badge ${badge(c.daily_return)}">${pct(c.daily_return)}</span>
+        </div>
+    </button>`).join("")
 }
 function renderOverview(){
     if(!state.companies.length){$("#summary").innerHTML=`<div class="sum" style="grid-column:1/-1">${errorBox("Unable to build the overview without company data.")}</div>`;$("#sector-table").innerHTML=errorBox("Sector data is unavailable.");return}
@@ -300,7 +317,7 @@ $("#menu-btn").addEventListener("click",()=>sidebar(!$("#sidebar").classList.con
 $("#overlay").addEventListener("click",()=>sidebar(false));
 $("#search").addEventListener("input",renderCompanies);
 $("#pills").addEventListener("click",(e)=>{const b=e.target.closest(".pill");if(!b)return;state.sector=b.dataset.sector;renderPills();renderCompanies()});
-$("#company-list").addEventListener("click",async(e)=>{const b=e.target.closest(".company");if(!b)return;switchTab("detail");sidebar(false);await loadDetail(b.dataset.symbol)});
+$("#company-list").addEventListener("click",async(e)=>{const b=e.target.closest(".company");if(!b)return;state.current=b.dataset.symbol;renderCompanies();switchTab("detail");sidebar(false);await loadDetail(b.dataset.symbol)});
 $("#tabs").addEventListener("click",(e)=>{const b=e.target.closest(".tab");if(!b)return;switchTab(b.dataset.tab)});
 $("#detail-view").addEventListener("click",async(e)=>{const b=e.target.closest(".rbtn");if(!b||!state.current)return;const days=Number(b.dataset.days);if(!Number.isFinite(days)||days===state.days)return;state.days=days;await loadDetail(state.current)});
 $("#heatmap-out").addEventListener("click",async(e)=>{const b=e.target.closest(".heat");if(!b)return;switchTab("detail");await loadDetail(b.dataset.symbol)});
