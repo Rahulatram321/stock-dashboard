@@ -1,11 +1,10 @@
 """Database configuration and SQLAlchemy models for stock data."""
 
 import logging
-from datetime import datetime
-from typing import Optional
+from collections.abc import Generator
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine, inspect, text
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +28,7 @@ class StockPrice(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     symbol = Column(String, nullable=False, index=True)
+    sector = Column(String, nullable=True, index=True)
     date = Column(DateTime, nullable=False, index=True)
     open = Column(Float, nullable=True)
     high = Column(Float, nullable=True)
@@ -42,14 +42,53 @@ class StockPrice(Base):
     volatility_score = Column(Float, nullable=True)
 
 
+def ensure_stock_prices_schema() -> None:
+    """Patch older SQLite files so the ORM schema matches the live table."""
+
+    inspector = inspect(engine)
+    if "stock_prices" not in inspector.get_table_names():
+        return
+
+    existing_columns = {
+        column["name"] for column in inspector.get_columns("stock_prices")
+    }
+
+    with engine.begin() as connection:
+        if "sector" not in existing_columns:
+            connection.execute(text("ALTER TABLE stock_prices ADD COLUMN sector VARCHAR"))
+            logger.info("Added missing 'sector' column to stock_prices.")
+
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_stock_prices_sector "
+                "ON stock_prices (sector)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_stock_prices_symbol "
+                "ON stock_prices (symbol)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_stock_prices_date "
+                "ON stock_prices (date)"
+            )
+        )
+
+
 def create_tables() -> None:
     """Create all tables in the database if they don't exist."""
+
     Base.metadata.create_all(bind=engine)
-    logger.info("Database tables created successfully.")
+    ensure_stock_prices_schema()
+    logger.info("Database tables are ready.")
 
 
-def get_db() -> Session:
+def get_db() -> Generator[Session, None, None]:
     """Get a database session."""
+
     db = SessionLocal()
     try:
         yield db
@@ -58,13 +97,16 @@ def get_db() -> Session:
 
 
 def is_db_empty() -> bool:
-    """Check if the stock_prices table is empty."""
-    db = SessionLocal()
-    try:
-        count = db.query(StockPrice).count()
-        return count == 0
-    except Exception as e:
-        logger.error(f"Error checking database: {e}")
+    """Check whether the stock_prices table is empty."""
+
+    inspector = inspect(engine)
+    if "stock_prices" not in inspector.get_table_names():
         return True
-    finally:
-        db.close()
+
+    try:
+        with engine.connect() as connection:
+            count = connection.execute(text("SELECT COUNT(*) FROM stock_prices")).scalar()
+        return int(count or 0) == 0
+    except Exception as exc:
+        logger.error("Error checking database contents: %s", exc)
+        return True

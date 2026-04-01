@@ -1,248 +1,237 @@
-# Stock Data Intelligence Dashboard
+# StockIQ - NSE Market Intelligence Platform
 
-A comprehensive, production-ready stock analytics platform that fetches, processes, and visualizes daily data for 8 major Indian stocks. Built with FastAPI, SQLAlchemy, and Chart.js, this dashboard provides real-time metrics, technical indicators, comparative analysis, and market movers — all served through a clean, self-contained frontend interface with zero build steps required.
+![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.110-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-Database-003B57?style=for-the-badge&logo=sqlite&logoColor=white)
+![Chart.js](https://img.shields.io/badge/Chart.js-Frontend-FF6384?style=for-the-badge&logo=chartdotjs&logoColor=white)
+![Render](https://img.shields.io/badge/Deployed_on-Render-4B5563?style=for-the-badge&logo=render&logoColor=white)
 
-## Tech Stack
+StockIQ is a single-page NSE market dashboard built with FastAPI, SQLite, and Chart.js. It tracks 30 major stocks across 6 sectors, exposes market intelligence APIs, and ships with a fintech-style frontend for overview, sector, comparison, and forecast workflows.
 
-| Library              | Purpose                                                     |
-| -------------------- | ----------------------------------------------------------- |
-| **FastAPI**          | REST API framework with automatic OpenAPI/Swagger docs      |
-| **Uvicorn**          | ASGI server for running the FastAPI application             |
-| **SQLAlchemy**       | ORM for SQLite database operations                          |
-| **yfinance**         | Fetching historical OHLCV stock data from Yahoo Finance     |
-| **Pandas**           | Data manipulation, cleaning, and calculated columns         |
-| **NumPy**            | Correlation coefficient computation for stock comparison    |
-| **Chart.js**         | Client-side charting library for interactive visualizations |
-| **Requests**         | HTTP client library (available for extensions)              |
-| **Python-Multipart** | Form data parsing support for FastAPI                       |
-| **Python-Dotenv**    | Environment variable management                             |
-| **Pydantic**         | Data validation and serialization for API schemas           |
+## Features
 
-## Setup Instructions
+- [x] 30 NSE stocks tracked in one platform
+- [x] 6 sectors: IT, Banking, Energy, Finance, Consumer, Auto
+- [x] 7 core REST endpoints for dashboard workflows
+- [x] 7-day price prediction using linear regression
+- [x] Sector heatmap with grouped stock tiles
+- [x] Live deployment on Render and GitHub Pages
 
-### Prerequisites
+## Architecture
 
-- Python 3.9 or higher
-- pip package manager
+StockIQ follows a 4-layer flow:
 
-### Installation
+1. Data Collection
+   `data_collector.py` fetches 1 year of OHLCV data from Yahoo Finance, computes derived fields, and maps every symbol to a sector.
+2. SQLite Database
+   `stock_data.db` stores historical prices plus daily return, 7-day moving average, 52-week high, 52-week low, volatility score, and sector.
+3. FastAPI API
+   `main.py` exposes clean JSON endpoints for company lists, historical series, summaries, comparisons, sector views, movers, and prediction.
+4. Chart.js Frontend
+   `docs/index.html` is a single-file UI with overview cards, a simulated candlestick chart, comparison analytics, and a sector heatmap.
 
-1. **Navigate to the project directory:**
-
-   ```bash
-   cd stock_dashboard
-   ```
-
-2. **Install dependencies:**
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Start the backend server:**
-
-   ```bash
-   python main.py
-   ```
-
-   The server will start on `http://localhost:8000`. On first run, it will automatically fetch 1 year of data for all 8 stocks and store it in a SQLite database (`stock_data.db`). This initial data collection may take 1-3 minutes depending on your internet connection.
-
-4. **Open the frontend:**
-   Simply open `frontend/index.html` in your web browser. You can do this by:
-   - Double-clicking the file in your file explorer
-   - Running: `start frontend/index.html` (Windows) or `open frontend/index.html` (Mac)
-
-5. **Access API documentation:**
-   Visit `http://localhost:8000/docs` for the interactive Swagger UI with all endpoints documented and testable.
+```text
+Data Collection -> SQLite DB -> FastAPI -> Chart.js Frontend
+```
 
 ## API Endpoints
 
-### GET `/companies`
+These are the 7 core dashboard endpoints. A separate forecast route is documented in Custom Metrics below.
 
-Returns a list of all 8 tracked companies with their latest stock data.
+### 1. `GET /companies`
 
-**Response:**
+Returns the latest snapshot for every tracked company.
 
 ```json
 [
   {
-    "symbol": "RELIANCE.NS",
-    "name": "Reliance Industries",
-    "current_price": 2456.75,
-    "daily_return": 1.23,
-    "volatility_score": 2.15
+    "symbol": "TCS.NS",
+    "name": "Tata Consultancy Services",
+    "sector": "IT",
+    "current_price": 2358.9,
+    "daily_return": -0.6821,
+    "volatility_score": 5.0122
   }
 ]
 ```
 
-**Example curl:**
+### 2. `GET /data/{symbol}?days=30`
 
-```bash
-curl http://localhost:8000/companies
+Returns recent OHLCV history with daily return and 7-day moving average.
+
+```json
+[
+  {
+    "date": "2026-03-27T00:00:00",
+    "open": 2375.0,
+    "high": 2381.9,
+    "low": 2348.55,
+    "close": 2358.9,
+    "volume": 5117420.0,
+    "daily_return": -0.6821,
+    "moving_avg_7": 2412.64
+  }
+]
 ```
 
----
+### 3. `GET /summary/{symbol}`
 
-### GET `/data/{symbol}?days=30`
-
-Returns the last N days (default 30) of stock data for a given symbol, sorted by date ascending.
-
-**Path Parameters:**
-
-- `symbol` (required): Stock symbol (e.g., `RELIANCE.NS`, `TCS.NS`)
-
-**Query Parameters:**
-
-- `days` (optional): Number of days to return (1-365, default: 30)
-
-**Example curl:**
-
-```bash
-curl "http://localhost:8000/data/INFY.NS?days=60"
-```
-
----
-
-### GET `/summary/{symbol}`
-
-Returns aggregate statistics for a stock over its entire history in the database.
-
-**Response:**
+Returns long-range summary statistics for one stock.
 
 ```json
 {
   "symbol": "TCS.NS",
-  "week52_high": 4049.5,
-  "week52_low": 3056.75,
-  "avg_close": 3562.34,
-  "avg_daily_return": 0.05,
-  "avg_volatility": 1.87,
-  "total_trading_days": 245
+  "week52_high": 4585.8,
+  "week52_low": 2358.9,
+  "avg_close": 3361.8,
+  "avg_daily_return": -0.0422,
+  "avg_volatility": 4.7973,
+  "total_trading_days": 248
 }
 ```
 
-**Example curl:**
+### 4. `GET /compare?symbol1=TCS.NS&symbol2=INFY.NS`
 
-```bash
-curl http://localhost:8000/summary/HDFCBANK.NS
-```
-
----
-
-### GET `/compare?symbol1=INFY.NS&symbol2=TCS.NS`
-
-Compares two stocks by returning their last 90 days of closing prices aligned by date, plus the Pearson correlation coefficient between their daily returns.
-
-**Query Parameters:**
-
-- `symbol1` (required): First stock symbol
-- `symbol2` (required): Second stock symbol
-
-**Response:**
+Returns aligned closing-price series for both symbols plus their correlation coefficient.
 
 ```json
 {
-  "symbol1": "INFY.NS",
-  "symbol2": "TCS.NS",
-  "data1": [{ "date": "2025-01-15T00:00:00", "close": 1823.45 }],
-  "data2": [{ "date": "2025-01-15T00:00:00", "close": 3789.2 }],
-  "correlation": 0.7834
+  "symbol1": "TCS.NS",
+  "symbol2": "INFY.NS",
+  "data1": [{ "date": "2026-01-02T00:00:00", "close": 3192.66 }],
+  "data2": [{ "date": "2026-01-02T00:00:00", "close": 1404.95 }],
+  "correlation": 0.6241
 }
 ```
 
-**Example curl:**
+### 5. `GET /top-movers`
 
-```bash
-curl "http://localhost:8000/compare?symbol1=INFY.NS&symbol2=TCS.NS"
-```
-
----
-
-### GET `/top-movers`
-
-Returns the top 3 gainers and top 3 losers by daily return percentage for the most recent trading date in the database.
-
-**Response:**
+Returns the top 3 gainers and top 3 losers from the latest market snapshot.
 
 ```json
 {
   "top_gainers": [
     {
-      "symbol": "SBIN.NS",
-      "name": "State Bank of India",
-      "current_price": 623.4,
-      "daily_return": 2.45
+      "symbol": "EICHERMOT.NS",
+      "name": "Eicher Motors",
+      "current_price": 6825.5,
+      "daily_return": 0.5599
     }
   ],
   "top_losers": [
     {
-      "symbol": "WIPRO.NS",
-      "name": "Wipro",
-      "current_price": 445.8,
-      "daily_return": -1.87
+      "symbol": "BAJFINANCE.NS",
+      "name": "Bajaj Finance",
+      "current_price": 6466.2,
+      "daily_return": -3.5439
     }
   ]
 }
 ```
 
-**Example curl:**
+### 6. `GET /sectors`
 
-```bash
-curl http://localhost:8000/top-movers
+Returns one row per sector with the latest average return, volatility, and stock count.
+
+```json
+[
+  {
+    "sector": "IT",
+    "avg_daily_return": -1.1362,
+    "avg_volatility": 4.0453,
+    "stock_count": 5
+  }
+]
 ```
 
----
+### 7. `GET /sector/{sector_name}`
 
-### GET `/`
+Returns every company in the requested sector with the latest market values.
 
-Health check endpoint.
-
-**Example curl:**
-
-```bash
-curl http://localhost:8000/
+```json
+{
+  "sector": "Auto",
+  "stocks": [
+    {
+      "symbol": "TMCV.NS",
+      "name": "Tata Motors Limited",
+      "current_price": 394.8,
+      "daily_return": -3.9088,
+      "volatility_score": 7.6541
+    }
+  ]
+}
 ```
 
-## Custom Metric: Volatility Score
+## Custom Metrics
 
-The **volatility_score** is a custom metric calculated as the **30-day coefficient of variation expressed as a percentage**:
+### Volatility Score
 
+The volatility score is the 30-day coefficient of variation:
+
+```text
+volatility_score = (30-day rolling std / 30-day rolling mean) * 100
 ```
-volatility_score = (30-day rolling_std / 30-day rolling_mean) × 100
+
+Higher values indicate wider price swings; lower values indicate steadier movement.
+
+### Prediction Model
+
+`GET /predict/{symbol}?days=7` fits a degree-1 line with `numpy.polyfit` over the last 60 closing prices and extends the line forward.
+
+```json
+{
+  "symbol": "TMCV.NS",
+  "historical": [{ "date": "2026-03-25", "close": 402.6 }],
+  "predicted": [{ "date": "2026-04-02", "predicted_close": 392.14 }],
+  "trend": "bearish"
+}
 ```
 
-### What it means:
+- `trend = "bullish"` when slope > 0
+- `trend = "bearish"` when slope <= 0
 
-- It measures the relative dispersion of closing prices over a rolling 30-day window
-- A **higher volatility score** (e.g., 5%+) indicates the stock price fluctuates significantly relative to its average — implying higher risk and potentially higher reward
-- A **lower volatility score** (e.g., <1%) indicates stable, predictable price movements
+## Setup
 
-### Why it's useful:
+### Prerequisites
 
-1. **Risk Assessment**: Unlike raw standard deviation, the coefficient of variation normalizes volatility relative to price level, making it comparable across stocks with different price ranges (e.g., comparing a ₹500 stock to a ₹4000 stock)
-2. **Portfolio Construction**: Helps identify which stocks are more stable vs. speculative, aiding in balanced portfolio allocation
-3. **Trend Detection**: A rising volatility score often precedes significant price movements, serving as an early warning signal
+- Python 3.11+
+- `pip`
 
-## Screenshots
+### Install and Run
 
-Run the app locally, open `frontend/index.html`, and capture fresh screenshots before submission.
+1. Open the project folder:
 
-Suggested screenshots to place in the `screenshots/` folder:
+   ```bash
+   cd stock_dashboard
+   ```
 
-- `dashboard-overview.png`: left company list plus the main price chart
-- `stock-detail.png`: one company selected with the metric cards visible
-- `stock-comparison.png`: the compare chart with the correlation badge visible
+2. Install dependencies:
 
-The repository includes a `screenshots/` folder placeholder so the README renders cleanly even before images are added.
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-## Future Improvements
+3. Start the API:
 
-1. **ML-Based Prediction**: Integrate machine learning models (LSTM, Random Forest, or Prophet) to predict next-day closing prices and generate buy/sell signals based on historical patterns and technical indicators.
+   ```bash
+   python main.py
+   ```
 
-2. **WebSocket Live Data**: Replace batch data collection with real-time WebSocket connections to a live market data provider (e.g., Kite Connect, Upstox) for intraday price streaming and live dashboard updates.
+4. Open the frontend:
 
-3. **Deployment on Render**: Package the application with a `Dockerfile` and deploy on Render.com or Railway.app with a managed PostgreSQL database, environment-based configuration, and CI/CD pipelines for automated deployments.
+   - Local file: `docs/index.html`
+   - Local API docs: `http://localhost:8000/docs`
 
-4. **Additional Technical Indicators**: Add RSI (Relative Strength Index), MACD (Moving Average Convergence Divergence), Bollinger Bands, and Volume-weighted Average Price (VWAP) for deeper technical analysis.
+On startup, the app creates or migrates the SQLite schema, backfills sector metadata, and collects missing tracked symbols.
 
-5. **User Authentication & Watchlists**: Implement JWT-based authentication with personalized watchlists, alerts, and portfolio tracking features for individual user accounts.
+## Live Links
+
+- Backend: [https://stock-dashboard-sykz.onrender.com](https://stock-dashboard-sykz.onrender.com)
+- Frontend: [https://rahulatram321.github.io/stock-dashboard/](https://rahulatram321.github.io/stock-dashboard/)
+- API Docs: [https://stock-dashboard-sykz.onrender.com/docs](https://stock-dashboard-sykz.onrender.com/docs)
+
+## Notes
+
+- As of April 1, 2026, Yahoo Finance no longer resolves `TATAMOTORS.NS` reliably. StockIQ keeps Tata Motors coverage by collecting `TMCV.NS` and accepting `TATAMOTORS.NS` as a compatibility alias in the API.
+- The checked-in SQLite file now contains the full 30-stock, 6-sector dataset.

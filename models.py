@@ -1,7 +1,7 @@
 """Pydantic models for API request/response schemas."""
 
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, date
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +11,7 @@ class CompanyInfo(BaseModel):
 
     symbol: str
     name: str
+    sector: Optional[str] = None
     current_price: Optional[float] = None
     daily_return: Optional[float] = None
     volatility_score: Optional[float] = None
@@ -74,11 +75,61 @@ class TopMoversResponse(BaseModel):
     top_losers: List[MoversData]
 
 
+class SectorInfo(BaseModel):
+    """Response model for sector summary."""
+
+    sector: str
+    avg_daily_return: Optional[float] = None
+    avg_volatility: Optional[float] = None
+    stock_count: int = 0
+
+
+class SectorDetail(BaseModel):
+    """Response model for sector detail with individual stocks."""
+
+    sector: str
+    stocks: List["SectorStockInfo"]
+
+
+class SectorStockInfo(BaseModel):
+    """Response model for a stock within a sector."""
+
+    symbol: str
+    name: str
+    current_price: Optional[float] = None
+    daily_return: Optional[float] = None
+    volatility_score: Optional[float] = None
+
+
+class HistoricalPrice(BaseModel):
+    """Response model for historical price data point."""
+
+    date: str
+    close: float
+
+
+class PredictedPrice(BaseModel):
+    """Response model for predicted price data point."""
+
+    date: str
+    predicted_close: float
+
+
+class PredictionResponse(BaseModel):
+    """Response model for price prediction."""
+
+    symbol: str
+    historical: List[HistoricalPrice]
+    predicted: List[PredictedPrice]
+    trend: str  # "bullish" or "bearish"
+
+
 class StockPriceDB(BaseModel):
     """Full database row model for stock prices."""
 
     id: int
     symbol: str
+    sector: Optional[str] = None
     date: datetime
     open: Optional[float] = None
     high: Optional[float] = None

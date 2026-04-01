@@ -1,49 +1,98 @@
-"""FastAPI application for Stock Data Intelligence Dashboard."""
+"""FastAPI application for the StockIQ dashboard."""
 
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import List, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from database import StockPrice, SessionLocal, create_tables
-from data_collector import run_data_collection, get_company_name
+from data_collector import SECTOR_STOCKS, canonical_symbol, get_company_name, run_data_collection
+from database import SessionLocal, StockPrice, create_tables
 from models import (
     CompanyInfo,
-    StockDataPoint,
-    StockSummary,
     CompareDataPoint,
     ComparisonResponse,
+    HistoricalPrice,
     MoversData,
+    PredictionResponse,
+    PredictedPrice,
+    SectorDetail,
+    SectorInfo,
+    SectorStockInfo,
+    StockDataPoint,
+    StockSummary,
     TopMoversResponse,
 )
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+SECTOR_ORDER = ["IT", "Banking", "Energy", "Finance", "Consumer", "Auto"]
+
 
 def normalize_symbol(symbol: str) -> str:
     """Normalize symbols so both INFY and INFY.NS resolve to the NSE form."""
+
     normalized = symbol.strip().upper()
     if not normalized.endswith(".NS"):
         normalized = f"{normalized}.NS"
-    return normalized
+    return canonical_symbol(normalized)
+
+
+def resolve_sector_name(sector_name: str) -> Optional[str]:
+    """Resolve sector names case-insensitively."""
+
+    target = sector_name.strip().lower()
+    for sector in SECTOR_STOCKS:
+        if sector.lower() == target:
+            return sector
+    return None
+
+
+def build_latest_rows_subquery(db: Session):
+    """Return a subquery with the latest available row for each symbol."""
+
+    return (
+        db.query(
+            StockPrice.symbol.label("symbol"),
+            func.max(StockPrice.date).label("max_date"),
+        )
+        .group_by(StockPrice.symbol)
+        .subquery()
+    )
+
+
+def get_latest_rows(db: Session, sector_name: Optional[str] = None) -> List[StockPrice]:
+    """Fetch the latest record for each tracked symbol."""
+
+    latest_rows_subquery = build_latest_rows_subquery(db)
+    query = db.query(StockPrice).join(
+        latest_rows_subquery,
+        (StockPrice.symbol == latest_rows_subquery.c.symbol)
+        & (StockPrice.date == latest_rows_subquery.c.max_date),
+    )
+
+    if sector_name:
+        query = query.filter(StockPrice.sector == sector_name)
+
+    return query.all()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events for the FastAPI application."""
-    logger.info("Starting up Stock Data Intelligence Dashboard...")
+
+    logger.info("Starting up StockIQ...")
     create_tables()
     run_data_collection()
     logger.info("Startup complete. Serving requests.")
@@ -52,14 +101,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Stock Data Intelligence Dashboard",
-    description="A comprehensive stock analytics platform providing real-time data, "
-    "technical indicators, and comparative analysis for major Indian stocks.",
-    version="1.0.0",
+    title="StockIQ - NSE Market Intelligence Platform",
+    description=(
+        "A stock analytics platform for major Indian equities with sector summaries, "
+        "comparisons, technical metrics, and linear-regression forecasts."
+    ),
+    version="3.0.0",
     lifespan=lifespan,
 )
 
-# CORS middleware - allow all origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -71,6 +121,7 @@ app.add_middleware(
 
 def get_db_session() -> Session:
     """Dependency to get a database session."""
+
     db = SessionLocal()
     try:
         yield db
@@ -83,38 +134,21 @@ def get_db_session() -> Session:
     response_model=List[CompanyInfo],
     tags=["Companies"],
     summary="Get all companies with latest stock data",
-    description="Returns a list of all 8 tracked Indian stocks with their current price, "
-    "daily return percentage, and volatility score based on the latest data in the database.",
 )
 def get_companies(db: Session = Depends(get_db_session)) -> List[CompanyInfo]:
     """Get all companies with their latest stock information."""
+
     try:
-        # Get the latest date in the database
-        latest_date_subquery = (
-            db.query(StockPrice.symbol, func.max(StockPrice.date).label("max_date"))
-            .group_by(StockPrice.symbol)
-            .subquery()
-        )
+        latest_prices = get_latest_rows(db)
+        if not latest_prices:
+            raise HTTPException(status_code=404, detail="No company data available")
 
-        # Get the latest row for each symbol
-        latest_prices = (
-            db.query(StockPrice)
-            .join(
-                latest_date_subquery,
-                (StockPrice.symbol == latest_date_subquery.c.symbol)
-                & (StockPrice.date == latest_date_subquery.c.max_date),
-            )
-            .all()
-        )
-
-        companies: List[CompanyInfo] = []
-        for price in latest_prices:
-            company = CompanyInfo(
+        companies = [
+            CompanyInfo(
                 symbol=price.symbol,
                 name=get_company_name(price.symbol),
-                current_price=round(price.close, 2)
-                if price.close is not None
-                else None,
+                sector=price.sector,
+                current_price=round(price.close, 2) if price.close is not None else None,
                 daily_return=round(price.daily_return, 4)
                 if price.daily_return is not None
                 else None,
@@ -122,16 +156,26 @@ def get_companies(db: Session = Depends(get_db_session)) -> List[CompanyInfo]:
                 if price.volatility_score is not None
                 else None,
             )
-            companies.append(company)
+            for price in latest_prices
+        ]
 
-        companies.sort(key=lambda x: x.symbol)
+        companies.sort(
+            key=lambda company: (
+                SECTOR_ORDER.index(company.sector)
+                if company.sector in SECTOR_ORDER
+                else len(SECTOR_ORDER),
+                company.symbol,
+            )
+        )
         return companies
 
-    except Exception as e:
-        logger.error(f"Error fetching companies: {e}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error fetching companies: %s", exc)
         raise HTTPException(
-            status_code=500, detail=f"Failed to fetch companies: {str(e)}"
-        )
+            status_code=500, detail=f"Failed to fetch companies: {exc}"
+        ) from exc
 
 
 @app.get(
@@ -139,8 +183,6 @@ def get_companies(db: Session = Depends(get_db_session)) -> List[CompanyInfo]:
     response_model=List[StockDataPoint],
     tags=["Stock Data"],
     summary="Get historical stock data",
-    description="Returns the last N days (default 30) of stock data for the specified symbol, "
-    "including OHLCV, daily return, and 7-day moving average. Sorted by date ascending.",
 )
 def get_stock_data(
     symbol: str,
@@ -148,6 +190,7 @@ def get_stock_data(
     db: Session = Depends(get_db_session),
 ) -> List[StockDataPoint]:
     """Get historical stock data for a specific symbol."""
+
     try:
         normalized_symbol = normalize_symbol(symbol)
         records = (
@@ -164,12 +207,9 @@ def get_stock_data(
                 detail=f"No data found for symbol: {normalized_symbol}",
             )
 
-        # Sort by date ascending
         records.reverse()
-
-        data_points: List[StockDataPoint] = []
-        for record in records:
-            point = StockDataPoint(
+        return [
+            StockDataPoint(
                 date=record.date,
                 open=round(record.open, 2) if record.open is not None else None,
                 high=round(record.high, 2) if record.high is not None else None,
@@ -183,18 +223,16 @@ def get_stock_data(
                 if record.moving_avg_7 is not None
                 else None,
             )
-            data_points.append(point)
-
-        return data_points
+            for record in records
+        ]
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error fetching data for {symbol}: {e}")
+    except Exception as exc:
+        logger.error("Error fetching data for %s: %s", symbol, exc)
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch data for {symbol}: {str(e)}",
-        )
+            status_code=500, detail=f"Failed to fetch data for {symbol}: {exc}"
+        ) from exc
 
 
 @app.get(
@@ -202,20 +240,13 @@ def get_stock_data(
     response_model=StockSummary,
     tags=["Stock Data"],
     summary="Get stock summary statistics",
-    description="Returns aggregate statistics for the specified stock including 52-week "
-    "high/low, average close, average daily return, average volatility, and total trading days.",
 )
-def get_summary(
-    symbol: str, db: Session = Depends(get_db_session)
-) -> StockSummary:
+def get_summary(symbol: str, db: Session = Depends(get_db_session)) -> StockSummary:
     """Get summary statistics for a specific stock."""
+
     try:
         normalized_symbol = normalize_symbol(symbol)
-        records = (
-            db.query(StockPrice)
-            .filter(StockPrice.symbol == normalized_symbol)
-            .all()
-        )
+        records = db.query(StockPrice).filter(StockPrice.symbol == normalized_symbol).all()
 
         if not records:
             raise HTTPException(
@@ -223,39 +254,37 @@ def get_summary(
                 detail=f"No data found for symbol: {normalized_symbol}",
             )
 
-        # Calculate aggregates
-        closes = [r.close for r in records if r.close is not None]
-        returns = [r.daily_return for r in records if r.daily_return is not None]
-        volatilities = [
-            r.volatility_score for r in records if r.volatility_score is not None
+        closes = [record.close for record in records if record.close is not None]
+        returns = [
+            record.daily_return for record in records if record.daily_return is not None
         ]
-        highs = [r.week52_high for r in records if r.week52_high is not None]
-        lows = [r.week52_low for r in records if r.week52_low is not None]
+        volatilities = [
+            record.volatility_score
+            for record in records
+            if record.volatility_score is not None
+        ]
+        highs = [record.week52_high for record in records if record.week52_high is not None]
+        lows = [record.week52_low for record in records if record.week52_low is not None]
 
-        summary = StockSummary(
+        return StockSummary(
             symbol=normalized_symbol,
             week52_high=round(max(highs), 2) if highs else None,
             week52_low=round(min(lows), 2) if lows else None,
             avg_close=round(sum(closes) / len(closes), 2) if closes else None,
-            avg_daily_return=round(sum(returns) / len(returns), 4)
-            if returns
-            else None,
+            avg_daily_return=round(sum(returns) / len(returns), 4) if returns else None,
             avg_volatility=round(sum(volatilities) / len(volatilities), 4)
             if volatilities
             else None,
             total_trading_days=len(records),
         )
 
-        return summary
-
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error fetching summary for {symbol}: {e}")
+    except Exception as exc:
+        logger.error("Error fetching summary for %s: %s", symbol, exc)
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch summary for {symbol}: {str(e)}",
-        )
+            status_code=500, detail=f"Failed to fetch summary for {symbol}: {exc}"
+        ) from exc
 
 
 @app.get(
@@ -263,20 +292,18 @@ def get_summary(
     response_model=ComparisonResponse,
     tags=["Comparison"],
     summary="Compare two stocks",
-    description="Returns the last 90 days of closing prices for two stocks aligned by date, "
-    "plus the Pearson correlation coefficient between their daily returns.",
 )
 def compare_stocks(
     symbol1: str = Query(..., description="First stock symbol to compare"),
     symbol2: str = Query(..., description="Second stock symbol to compare"),
     db: Session = Depends(get_db_session),
 ) -> ComparisonResponse:
-    """Compare two stocks' performance over the last 90 days."""
+    """Compare two stocks over the last 90 trading days."""
+
     try:
         normalized_symbol1 = normalize_symbol(symbol1)
         normalized_symbol2 = normalize_symbol(symbol2)
 
-        # Get last 90 days for symbol1
         records1 = (
             db.query(StockPrice)
             .filter(StockPrice.symbol == normalized_symbol1)
@@ -284,8 +311,6 @@ def compare_stocks(
             .limit(90)
             .all()
         )
-
-        # Get last 90 days for symbol2
         records2 = (
             db.query(StockPrice)
             .filter(StockPrice.symbol == normalized_symbol2)
@@ -305,7 +330,7 @@ def compare_stocks(
                 detail=f"No data found for symbol: {normalized_symbol2}",
             )
 
-        df1 = pd.DataFrame(
+        frame_1 = pd.DataFrame(
             [
                 {
                     "date": record.date,
@@ -315,7 +340,7 @@ def compare_stocks(
                 for record in records1
             ]
         )
-        df2 = pd.DataFrame(
+        frame_2 = pd.DataFrame(
             [
                 {
                     "date": record.date,
@@ -326,29 +351,28 @@ def compare_stocks(
             ]
         )
 
-        aligned_df = pd.merge(df1, df2, on="date", how="inner").sort_values("date")
+        aligned = pd.merge(frame_1, frame_2, on="date", how="inner").sort_values("date")
 
         data1 = [
             CompareDataPoint(
                 date=pd.to_datetime(row.date).to_pydatetime(),
                 close=round(row.close_1, 2) if pd.notna(row.close_1) else None,
             )
-            for row in aligned_df.itertuples(index=False)
+            for row in aligned.itertuples(index=False)
         ]
         data2 = [
             CompareDataPoint(
                 date=pd.to_datetime(row.date).to_pydatetime(),
                 close=round(row.close_2, 2) if pd.notna(row.close_2) else None,
             )
-            for row in aligned_df.itertuples(index=False)
+            for row in aligned.itertuples(index=False)
         ]
 
-        returns_df = aligned_df.dropna(subset=["daily_return_1", "daily_return_2"])
-
         correlation: Optional[float] = None
-        if len(returns_df) > 1:
+        returns_frame = aligned.dropna(subset=["daily_return_1", "daily_return_2"])
+        if len(returns_frame) > 1:
             corr_value = np.corrcoef(
-                returns_df["daily_return_1"], returns_df["daily_return_2"]
+                returns_frame["daily_return_1"], returns_frame["daily_return_2"]
             )[0, 1]
             if not np.isnan(corr_value):
                 correlation = round(float(corr_value), 4)
@@ -363,12 +387,11 @@ def compare_stocks(
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error comparing {symbol1} and {symbol2}: {e}")
+    except Exception as exc:
+        logger.error("Error comparing %s and %s: %s", symbol1, symbol2, exc)
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to compare stocks: {str(e)}",
-        )
+            status_code=500, detail=f"Failed to compare stocks: {exc}"
+        ) from exc
 
 
 @app.get(
@@ -376,92 +399,262 @@ def compare_stocks(
     response_model=TopMoversResponse,
     tags=["Market"],
     summary="Get top gainers and losers",
-    description="Returns the top 3 gainers and top 3 losers by daily return percentage "
-    "for the most recent trading date available in the database.",
 )
 def get_top_movers(db: Session = Depends(get_db_session)) -> TopMoversResponse:
-    """Get top 3 gainers and top 3 losers by daily return."""
+    """Get the top three gainers and losers from the latest per-symbol snapshot."""
+
     try:
-        # Get the latest date in the database
-        latest_date = (
-            db.query(func.max(StockPrice.date)).scalar()
-        )
-
-        if not latest_date:
-            raise HTTPException(
-                status_code=404,
-                detail="No data available in database",
-            )
-
-        # Get all records for the latest date
-        latest_records = (
-            db.query(StockPrice)
-            .filter(StockPrice.date == latest_date)
-            .all()
-        )
-
+        latest_records = [
+            record for record in get_latest_rows(db) if record.daily_return is not None
+        ]
         if not latest_records:
-            raise HTTPException(
-                status_code=404,
-                detail="No data found for the latest date",
-            )
+            raise HTTPException(status_code=404, detail="No market data available")
 
-        valid_records = [r for r in latest_records if r.daily_return is not None]
-        gainers_source = sorted(
-            [r for r in valid_records if r.daily_return > 0],
-            key=lambda x: x.daily_return,
+        gainers = sorted(
+            [record for record in latest_records if record.daily_return > 0],
+            key=lambda record: record.daily_return,
             reverse=True,
-        )
-        losers_source = sorted(
-            [r for r in valid_records if r.daily_return < 0],
-            key=lambda x: x.daily_return,
-        )
-
-        # Top 3 gainers
-        gainers = []
-        for record in gainers_source[:3]:
-            gainer = MoversData(
-                symbol=record.symbol,
-                name=get_company_name(record.symbol),
-                current_price=round(record.close, 2)
-                if record.close is not None
-                else None,
-                daily_return=round(record.daily_return, 4),
-            )
-            gainers.append(gainer)
-
-        # Bottom 3 losers
-        losers = []
-        for record in losers_source[:3]:
-            loser = MoversData(
-                symbol=record.symbol,
-                name=get_company_name(record.symbol),
-                current_price=round(record.close, 2)
-                if record.close is not None
-                else None,
-                daily_return=round(record.daily_return, 4),
-            )
-            losers.append(loser)
+        )[:3]
+        losers = sorted(
+            [record for record in latest_records if record.daily_return < 0],
+            key=lambda record: record.daily_return,
+        )[:3]
 
         return TopMoversResponse(
-            top_gainers=gainers,
-            top_losers=losers,
+            top_gainers=[
+                MoversData(
+                    symbol=record.symbol,
+                    name=get_company_name(record.symbol),
+                    current_price=round(record.close, 2)
+                    if record.close is not None
+                    else None,
+                    daily_return=round(record.daily_return, 4),
+                )
+                for record in gainers
+            ],
+            top_losers=[
+                MoversData(
+                    symbol=record.symbol,
+                    name=get_company_name(record.symbol),
+                    current_price=round(record.close, 2)
+                    if record.close is not None
+                    else None,
+                    daily_return=round(record.daily_return, 4),
+                )
+                for record in losers
+            ],
         )
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Error fetching top movers: {e}")
+    except Exception as exc:
+        logger.error("Error fetching top movers: %s", exc)
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch top movers: {str(e)}",
+            status_code=500, detail=f"Failed to fetch top movers: {exc}"
+        ) from exc
+
+
+@app.get(
+    "/sectors",
+    response_model=List[SectorInfo],
+    tags=["Sectors"],
+    summary="Get all sectors with performance metrics",
+)
+def get_sectors(db: Session = Depends(get_db_session)) -> List[SectorInfo]:
+    """Get sector averages from the latest available snapshot."""
+
+    try:
+        latest_records = get_latest_rows(db)
+        if not latest_records:
+            raise HTTPException(status_code=404, detail="No sector data available")
+
+        grouped: dict[str, list[StockPrice]] = {}
+        for record in latest_records:
+            sector = record.sector or "Unknown"
+            grouped.setdefault(sector, []).append(record)
+
+        sector_summaries = []
+        for sector, records in grouped.items():
+            returns = [
+                record.daily_return for record in records if record.daily_return is not None
+            ]
+            volatilities = [
+                record.volatility_score
+                for record in records
+                if record.volatility_score is not None
+            ]
+            sector_summaries.append(
+                SectorInfo(
+                    sector=sector,
+                    avg_daily_return=round(sum(returns) / len(returns), 4)
+                    if returns
+                    else None,
+                    avg_volatility=round(sum(volatilities) / len(volatilities), 4)
+                    if volatilities
+                    else None,
+                    stock_count=len(records),
+                )
+            )
+
+        sector_summaries.sort(
+            key=lambda item: (
+                SECTOR_ORDER.index(item.sector)
+                if item.sector in SECTOR_ORDER
+                else len(SECTOR_ORDER),
+                item.sector,
+            )
         )
+        return sector_summaries
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error fetching sectors: %s", exc)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch sectors: {exc}"
+        ) from exc
+
+
+@app.get(
+    "/sector/{sector_name}",
+    response_model=SectorDetail,
+    tags=["Sectors"],
+    summary="Get sector detail with individual stocks",
+)
+def get_sector_detail(
+    sector_name: str, db: Session = Depends(get_db_session)
+) -> SectorDetail:
+    """Get the latest company snapshot for a specific sector."""
+
+    try:
+        resolved_sector = resolve_sector_name(sector_name)
+        if not resolved_sector:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Sector '{sector_name}' not found. Valid sectors: "
+                    f"{list(SECTOR_STOCKS.keys())}"
+                ),
+            )
+
+        records = get_latest_rows(db, resolved_sector)
+        if not records:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No companies found for sector: {resolved_sector}",
+            )
+
+        stocks = [
+            SectorStockInfo(
+                symbol=record.symbol,
+                name=get_company_name(record.symbol),
+                current_price=round(record.close, 2)
+                if record.close is not None
+                else None,
+                daily_return=round(record.daily_return, 4)
+                if record.daily_return is not None
+                else None,
+                volatility_score=round(record.volatility_score, 4)
+                if record.volatility_score is not None
+                else None,
+            )
+            for record in records
+        ]
+        stocks.sort(key=lambda stock: stock.symbol)
+
+        return SectorDetail(sector=resolved_sector, stocks=stocks)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error fetching sector detail for %s: %s", sector_name, exc)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch sector detail: {exc}"
+        ) from exc
+
+
+@app.get(
+    "/predict/{symbol}",
+    response_model=PredictionResponse,
+    tags=["Prediction"],
+    summary="Get price prediction using linear regression",
+)
+def predict_price(
+    symbol: str,
+    days: int = Query(default=7, ge=1, le=30),
+    db: Session = Depends(get_db_session),
+) -> PredictionResponse:
+    """Predict future prices using a degree-1 polynomial fit over the last 60 closes."""
+
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+        records = (
+            db.query(StockPrice)
+            .filter(StockPrice.symbol == normalized_symbol, StockPrice.close.isnot(None))
+            .order_by(StockPrice.date.desc())
+            .limit(60)
+            .all()
+        )
+
+        if not records:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No data found for symbol: {normalized_symbol}",
+            )
+
+        history_records = list(reversed(records))
+        if len(history_records) < 10:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Insufficient data for prediction. Need at least 10 closing prices."
+                ),
+            )
+
+        x_values = np.arange(len(history_records))
+        y_values = np.array([float(record.close) for record in history_records])
+        slope, intercept = np.polyfit(x_values, y_values, 1)
+
+        historical = [
+            HistoricalPrice(
+                date=record.date.strftime("%Y-%m-%d"),
+                close=round(float(record.close), 2),
+            )
+            for record in history_records
+        ]
+
+        last_date = history_records[-1].date
+        future_x = np.arange(len(history_records), len(history_records) + days)
+        predicted_values = (slope * future_x) + intercept
+        predicted = [
+            PredictedPrice(
+                date=(last_date + timedelta(days=offset + 1)).strftime("%Y-%m-%d"),
+                predicted_close=round(float(predicted_close), 2),
+            )
+            for offset, predicted_close in enumerate(predicted_values)
+        ]
+
+        return PredictionResponse(
+            symbol=normalized_symbol,
+            historical=historical,
+            predicted=predicted,
+            trend="bullish" if slope > 0 else "bearish",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error predicting price for %s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to predict price for {symbol}: {exc}"
+        ) from exc
 
 
 @app.get("/", tags=["Health"], summary="Health check")
 def root() -> dict:
-    """Health check endpoint. Returns API status message."""
-    return {"status": "ok", "message": "Stock Data Intelligence Dashboard API"}
+    """Health check endpoint."""
+
+    return {"status": "ok", "message": "StockIQ - NSE Market Intelligence Platform API"}
 
 
 if __name__ == "__main__":

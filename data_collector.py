@@ -1,127 +1,165 @@
 """Data collection module for fetching and processing stock data using yfinance."""
 
 import logging
-from datetime import datetime
-from typing import List
+from typing import Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from database import StockPrice, SessionLocal, create_tables, is_db_empty
 
 logger = logging.getLogger(__name__)
 
-STOCK_SYMBOLS: List[str] = [
-    "RELIANCE.NS",
-    "TCS.NS",
-    "INFY.NS",
-    "HDFCBANK.NS",
-    "WIPRO.NS",
-    "ICICIBANK.NS",
-    "SBIN.NS",
-    "BAJFINANCE.NS",
-]
+STOCKS: Dict[str, List[str]] = {
+    "IT": ["TCS.NS", "INFY.NS", "WIPRO.NS", "HCLTECH.NS", "TECHM.NS"],
+    "Banking": [
+        "HDFCBANK.NS",
+        "ICICIBANK.NS",
+        "SBIN.NS",
+        "AXISBANK.NS",
+        "KOTAKBANK.NS",
+    ],
+    "Energy": ["RELIANCE.NS", "ONGC.NS", "NTPC.NS", "POWERGRID.NS", "COALINDIA.NS"],
+    "Finance": [
+        "BAJFINANCE.NS",
+        "BAJAJFINSV.NS",
+        "HDFCLIFE.NS",
+        "SBILIFE.NS",
+        "ICICIGI.NS",
+    ],
+    "Consumer": [
+        "HINDUNILVR.NS",
+        "ITC.NS",
+        "NESTLEIND.NS",
+        "BRITANNIA.NS",
+        "DABUR.NS",
+    ],
+    "Auto": [
+        "MARUTI.NS",
+        "TMCV.NS",
+        "M&M.NS",
+        "BAJAJ-AUTO.NS",
+        "EICHERMOT.NS",
+    ],
+}
 
-COMPANY_NAMES: dict = {
-    "RELIANCE.NS": "Reliance Industries",
+SECTOR_STOCKS = STOCKS
+STOCK_SYMBOLS: List[str] = [
+    symbol for sector_symbols in STOCKS.values() for symbol in sector_symbols
+]
+SECTOR_BY_SYMBOL: Dict[str, str] = {
+    symbol: sector for sector, symbols in STOCKS.items() for symbol in symbols
+}
+SYMBOL_ALIASES: Dict[str, str] = {
+    "TATAMOTORS": "TMCV.NS",
+    "TATAMOTORS.NS": "TMCV.NS",
+}
+
+COMPANY_NAMES: Dict[str, str] = {
     "TCS.NS": "Tata Consultancy Services",
     "INFY.NS": "Infosys",
-    "HDFCBANK.NS": "HDFC Bank",
     "WIPRO.NS": "Wipro",
+    "HCLTECH.NS": "HCL Technologies",
+    "TECHM.NS": "Tech Mahindra",
+    "HDFCBANK.NS": "HDFC Bank",
     "ICICIBANK.NS": "ICICI Bank",
     "SBIN.NS": "State Bank of India",
+    "AXISBANK.NS": "Axis Bank",
+    "KOTAKBANK.NS": "Kotak Mahindra Bank",
+    "RELIANCE.NS": "Reliance Industries",
+    "ONGC.NS": "Oil & Natural Gas Corporation",
+    "NTPC.NS": "NTPC Limited",
+    "POWERGRID.NS": "Power Grid Corporation",
+    "COALINDIA.NS": "Coal India",
     "BAJFINANCE.NS": "Bajaj Finance",
+    "BAJAJFINSV.NS": "Bajaj Finserv",
+    "HDFCLIFE.NS": "HDFC Life Insurance",
+    "SBILIFE.NS": "SBI Life Insurance",
+    "ICICIGI.NS": "ICICI Lombard General Insurance",
+    "HINDUNILVR.NS": "Hindustan Unilever",
+    "ITC.NS": "ITC Limited",
+    "NESTLEIND.NS": "Nestle India",
+    "BRITANNIA.NS": "Britannia Industries",
+    "DABUR.NS": "Dabur India",
+    "MARUTI.NS": "Maruti Suzuki India",
+    "TMCV.NS": "Tata Motors Limited",
+    "M&M.NS": "Mahindra & Mahindra",
+    "BAJAJ-AUTO.NS": "Bajaj Auto",
+    "EICHERMOT.NS": "Eicher Motors",
 }
 
 
+def canonical_symbol(symbol: str) -> str:
+    """Resolve known legacy tickers to the working Yahoo Finance symbol."""
+
+    normalized = symbol.strip().upper()
+    return SYMBOL_ALIASES.get(normalized, normalized)
+
+
+def get_sector(symbol: str) -> Optional[str]:
+    """Get the sector for a given stock symbol."""
+
+    return SECTOR_BY_SYMBOL.get(canonical_symbol(symbol))
+
+
 def fetch_stock_data(symbol: str) -> pd.DataFrame:
-    """
-    Fetch 1 year of daily OHLCV data for a given stock symbol.
+    """Fetch 1 year of daily OHLCV data for a given stock symbol."""
 
-    Args:
-        symbol: Yahoo Finance stock symbol (e.g., 'RELIANCE.NS')
-
-    Returns:
-        DataFrame with raw OHLCV data
-    """
     try:
-        logger.info(f"Fetching data for {symbol}...")
+        logger.info("Fetching data for %s...", symbol)
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="1y", interval="1d")
 
         if df.empty:
-            logger.warning(f"No data returned for {symbol}")
+            logger.warning("No data returned for %s", symbol)
             return pd.DataFrame()
 
-        logger.info(f"Fetched {len(df)} rows for {symbol}")
+        logger.info("Fetched %d rows for %s", len(df), symbol)
         return df
 
-    except Exception as e:
-        logger.error(f"Error fetching data for {symbol}: {e}")
+    except Exception as exc:
+        logger.error("Error fetching data for %s: %s", symbol, exc)
         return pd.DataFrame()
 
 
-def clean_and_calculate(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """
-    Clean data and add calculated columns.
+def clean_and_calculate(
+    df: pd.DataFrame, symbol: str, sector: Optional[str] = None
+) -> pd.DataFrame:
+    """Clean data and add calculated columns."""
 
-    Args:
-        df: Raw OHLCV DataFrame from yfinance
-        symbol: Stock symbol for logging
-
-    Returns:
-        Cleaned DataFrame with calculated columns
-    """
     if df.empty:
         return df
 
     try:
-        # Drop rows with NaN in essential columns
-        df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+        cleaned = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"]).copy()
+        cleaned.index = pd.to_datetime(cleaned.index)
+        cleaned = cleaned.sort_index().reset_index()
 
-        # Ensure Date is datetime
-        df.index = pd.to_datetime(df.index)
+        if "Date" not in cleaned.columns:
+            date_column = cleaned.columns[0]
+            cleaned = cleaned.rename(columns={date_column: "Date"})
 
-        # Sort by date
-        df = df.sort_index()
+        cleaned["daily_return"] = (
+            (cleaned["Close"] - cleaned["Open"]) / cleaned["Open"]
+        ) * 100
+        cleaned["moving_avg_7"] = cleaned["Close"].rolling(window=7).mean()
+        cleaned["week52_high"] = cleaned["Close"].rolling(
+            window=252, min_periods=30
+        ).max()
+        cleaned["week52_low"] = cleaned["Close"].rolling(
+            window=252, min_periods=30
+        ).min()
 
-        # Reset index to make Date a column
-        df = df.reset_index()
-        df = df.rename(columns={"index": "Date"})
+        rolling_std = cleaned["Close"].rolling(window=30).std()
+        rolling_mean = cleaned["Close"].rolling(window=30).mean()
+        cleaned["volatility_score"] = (rolling_std / rolling_mean) * 100
 
-        if "Date" not in df.columns and df.index.name == "Date":
-            df = df.reset_index()
+        cleaned["symbol"] = symbol
+        cleaned["sector"] = sector or get_sector(symbol)
 
-        # Ensure Date column exists
-        if "Date" not in df.columns:
-            df["Date"] = df.index
-
-        # Calculate derived columns
-        # 1. Daily return as percentage: (Close - Open) / Open * 100
-        df["daily_return"] = ((df["Close"] - df["Open"]) / df["Open"]) * 100
-
-        # 2. 7-day moving average of Close
-        df["moving_avg_7"] = df["Close"].rolling(window=7).mean()
-
-        # 3. 52-week high (252 trading days, minimum 30 periods for stability)
-        df["week52_high"] = df["Close"].rolling(window=252, min_periods=30).max()
-
-        # 4. 52-week low (252 trading days, minimum 30 periods for stability)
-        df["week52_low"] = df["Close"].rolling(window=252, min_periods=30).min()
-
-        # 5. Volatility score: 30-day coefficient of variation as percentage
-        rolling_std = df["Close"].rolling(window=30).std()
-        rolling_mean = df["Close"].rolling(window=30).mean()
-        df["volatility_score"] = (rolling_std / rolling_mean) * 100
-
-        # Add symbol column
-        df["symbol"] = symbol
-
-        # Standardize column names to match DB schema
-        df = df.rename(
+        cleaned = cleaned.rename(
             columns={
                 "Date": "date",
                 "Open": "open",
@@ -133,40 +171,39 @@ def clean_and_calculate(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         )
 
         logger.info(
-            f"Cleaned data for {symbol}: {len(df)} rows, columns: {list(df.columns)}"
+            "Cleaned data for %s: %d rows ready for storage.",
+            symbol,
+            len(cleaned),
         )
-        return df
+        return cleaned
 
-    except Exception as e:
-        logger.error(f"Error cleaning data for {symbol}: {e}")
+    except Exception as exc:
+        logger.error("Error cleaning data for %s: %s", symbol, exc)
         return pd.DataFrame()
 
 
-def store_in_database(df: pd.DataFrame, symbol: str, db: Session) -> int:
-    """
-    Store cleaned stock data in the database.
+def store_in_database(
+    df: pd.DataFrame, symbol: str, db: Session, sector: Optional[str] = None
+) -> int:
+    """Store cleaned stock data in the database."""
 
-    Args:
-        df: Cleaned DataFrame with stock data
-        symbol: Stock symbol
-        db: SQLAlchemy session
-
-    Returns:
-        Number of rows stored
-    """
     if df.empty:
-        logger.warning(f"No data to store for {symbol}")
+        logger.warning("No data to store for %s", symbol)
         return 0
 
     try:
-        # Delete existing data for this symbol to avoid duplicates
+        resolved_sector = sector or get_sector(symbol)
+
         db.query(StockPrice).filter(StockPrice.symbol == symbol).delete()
 
         rows_stored = 0
         for _, row in df.iterrows():
             stock_price = StockPrice(
                 symbol=str(row.get("symbol", symbol)),
-                date=pd.to_datetime(row["date"]),
+                sector=str(row.get("sector", resolved_sector))
+                if row.get("sector", resolved_sector) is not None
+                else None,
+                date=pd.to_datetime(row["date"]).to_pydatetime(),
                 open=float(row["open"]) if pd.notna(row.get("open")) else None,
                 high=float(row["high"]) if pd.notna(row.get("high")) else None,
                 low=float(row["low"]) if pd.notna(row.get("low")) else None,
@@ -192,25 +229,18 @@ def store_in_database(df: pd.DataFrame, symbol: str, db: Session) -> int:
             rows_stored += 1
 
         db.commit()
-        logger.info(f"Successfully stored {rows_stored} rows for {symbol}")
+        logger.info("Stored %d rows for %s", rows_stored, symbol)
         return rows_stored
 
-    except Exception as e:
+    except Exception as exc:
         db.rollback()
-        logger.error(f"Error storing data for {symbol}: {e}")
+        logger.error("Error storing data for %s: %s", symbol, exc)
         return 0
 
 
 def backfill_missing_derived_metrics(db: Session) -> int:
-    """
-    Recalculate derived metrics for existing rows when stale data is detected.
+    """Recalculate derived metrics for rows missing 52-week values."""
 
-    Args:
-        db: SQLAlchemy session
-
-    Returns:
-        Number of rows updated
-    """
     stale_symbols = [
         symbol
         for symbol, filled_highs, filled_lows in db.query(
@@ -227,7 +257,7 @@ def backfill_missing_derived_metrics(db: Session) -> int:
         return 0
 
     logger.info(
-        "Found stale derived metrics for %d symbols. Backfilling from stored prices.",
+        "Found stale derived metrics for %d symbols. Recomputing from stored prices.",
         len(stale_symbols),
     )
 
@@ -245,30 +275,24 @@ def backfill_missing_derived_metrics(db: Session) -> int:
             if not records:
                 continue
 
-            df = pd.DataFrame(
-                [
-                    {
-                        "open": record.open,
-                        "close": record.close,
-                    }
-                    for record in records
-                ]
+            frame = pd.DataFrame(
+                [{"open": record.open, "close": record.close} for record in records]
             )
 
-            df["daily_return"] = ((df["close"] - df["open"]) / df["open"]) * 100
-            df["moving_avg_7"] = df["close"].rolling(window=7).mean()
-            df["week52_high"] = df["close"].rolling(
+            frame["daily_return"] = ((frame["close"] - frame["open"]) / frame["open"]) * 100
+            frame["moving_avg_7"] = frame["close"].rolling(window=7).mean()
+            frame["week52_high"] = frame["close"].rolling(
                 window=252, min_periods=30
             ).max()
-            df["week52_low"] = df["close"].rolling(
+            frame["week52_low"] = frame["close"].rolling(
                 window=252, min_periods=30
             ).min()
 
-            rolling_std = df["close"].rolling(window=30).std()
-            rolling_mean = df["close"].rolling(window=30).mean()
-            df["volatility_score"] = (rolling_std / rolling_mean) * 100
+            rolling_std = frame["close"].rolling(window=30).std()
+            rolling_mean = frame["close"].rolling(window=30).mean()
+            frame["volatility_score"] = (rolling_std / rolling_mean) * 100
 
-            for record, row in zip(records, df.itertuples(index=False)):
+            for record, row in zip(records, frame.itertuples(index=False)):
                 record.daily_return = (
                     float(row.daily_return) if pd.notna(row.daily_return) else None
                 )
@@ -293,72 +317,129 @@ def backfill_missing_derived_metrics(db: Session) -> int:
         logger.info("Backfilled derived metrics for %d rows.", updated_rows)
         return updated_rows
 
-    except Exception as e:
+    except Exception as exc:
         db.rollback()
-        logger.error(f"Error backfilling derived metrics: {e}")
+        logger.error("Error backfilling derived metrics: %s", exc)
         return 0
 
 
-def run_data_collection() -> None:
-    """
-    Fetch, clean, and store data for all 8 stocks on startup if DB is empty.
-    """
-    logger.info("Starting data collection process...")
+def backfill_sector_metadata(db: Session) -> int:
+    """Populate the sector column for legacy rows after a schema upgrade."""
 
-    # Create tables if they don't exist
+    updated_rows = 0
+
+    try:
+        for symbol, sector in SECTOR_BY_SYMBOL.items():
+            result = db.execute(
+                text(
+                    "UPDATE stock_prices "
+                    "SET sector = :sector "
+                    "WHERE symbol = :symbol "
+                    "AND (sector IS NULL OR sector <> :sector)"
+                ),
+                {"symbol": symbol, "sector": sector},
+            )
+            updated_rows += int(result.rowcount or 0)
+
+        db.commit()
+
+        if updated_rows:
+            logger.info("Backfilled sector metadata for %d rows.", updated_rows)
+
+        return updated_rows
+
+    except Exception as exc:
+        db.rollback()
+        logger.error("Error backfilling sector metadata: %s", exc)
+        return 0
+
+
+def get_existing_symbols(db: Session) -> set[str]:
+    """Return the set of symbols already present in the database."""
+
+    rows = db.execute(text("SELECT DISTINCT symbol FROM stock_prices")).scalars().all()
+    return {str(symbol) for symbol in rows}
+
+
+def collect_symbol(symbol: str, sector: str, db: Session) -> int:
+    """Fetch, transform, and store a single stock symbol."""
+
+    raw_df = fetch_stock_data(symbol)
+    if raw_df.empty:
+        logger.warning("Skipping %s due to empty source data", symbol)
+        return 0
+
+    clean_df = clean_and_calculate(raw_df, symbol, sector)
+    if clean_df.empty:
+        logger.warning("Skipping %s due to cleaning failure", symbol)
+        return 0
+
+    return store_in_database(clean_df, symbol, db, sector)
+
+
+def run_data_collection() -> None:
+    """Fetch, clean, and store data for all tracked stocks when needed."""
+
+    logger.info("Starting data collection process...")
     create_tables()
 
     db = SessionLocal()
     try:
-        # Check if DB already has data
-        if not is_db_empty():
-            repaired_rows = backfill_missing_derived_metrics(db)
-            if repaired_rows:
+        repaired_rows = backfill_missing_derived_metrics(db)
+        sector_rows = backfill_sector_metadata(db)
+
+        symbols_to_collect: List[str]
+        if is_db_empty():
+            logger.info("Database is empty. Collecting all %d tracked stocks.", len(STOCK_SYMBOLS))
+            symbols_to_collect = list(STOCK_SYMBOLS)
+        else:
+            existing_symbols = get_existing_symbols(db)
+            symbols_to_collect = [
+                symbol for symbol in STOCK_SYMBOLS if symbol not in existing_symbols
+            ]
+
+            if symbols_to_collect:
                 logger.info(
-                    "Database already contains data. Repaired %d stale rows.",
-                    repaired_rows,
+                    "Database has %d/%d tracked symbols. Collecting %d missing symbols.",
+                    len(existing_symbols & set(STOCK_SYMBOLS)),
+                    len(STOCK_SYMBOLS),
+                    len(symbols_to_collect),
                 )
+            elif repaired_rows or sector_rows:
+                logger.info(
+                    "Database already contains tracked symbols. Repaired %d rows and updated %d sector values.",
+                    repaired_rows,
+                    sector_rows,
+                )
+                return
             else:
-                logger.info("Database already contains data. Skipping collection.")
-            return
+                logger.info("Database already contains all tracked symbols. Skipping collection.")
+                return
 
         total_rows = 0
-        for symbol in STOCK_SYMBOLS:
-            # Fetch raw data
-            raw_df = fetch_stock_data(symbol)
-            if raw_df.empty:
-                logger.warning(f"Skipping {symbol} due to empty data")
-                continue
-
-            # Clean and calculate
-            clean_df = clean_and_calculate(raw_df, symbol)
-            if clean_df.empty:
-                logger.warning(f"Skipping {symbol} due to cleaning failure")
-                continue
-
-            # Store in database
-            rows = store_in_database(clean_df, symbol, db)
-            total_rows += rows
+        for sector, sector_symbols in STOCKS.items():
+            logger.info("Processing sector %s (%d stocks)", sector, len(sector_symbols))
+            for symbol in sector_symbols:
+                if symbol not in symbols_to_collect:
+                    continue
+                total_rows += collect_symbol(symbol, sector, db)
 
         logger.info(
-            f"Data collection complete. Total rows stored: {total_rows} across {len(STOCK_SYMBOLS)} stocks"
+            "Data collection complete. Stored %d rows across %d tracked symbols in %d sectors.",
+            total_rows,
+            len(STOCK_SYMBOLS),
+            len(STOCKS),
         )
 
-    except Exception as e:
-        logger.error(f"Data collection failed: {e}")
+    except Exception as exc:
+        logger.error("Data collection failed: %s", exc)
         raise
     finally:
         db.close()
 
 
 def get_company_name(symbol: str) -> str:
-    """
-    Get the full company name for a symbol.
+    """Get the full company name for a symbol."""
 
-    Args:
-        symbol: Stock symbol
-
-    Returns:
-        Full company name
-    """
-    return COMPANY_NAMES.get(symbol, symbol)
+    canonical = canonical_symbol(symbol)
+    return COMPANY_NAMES.get(canonical, canonical)
